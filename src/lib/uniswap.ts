@@ -241,10 +241,9 @@ export async function executeSwap(
   });
 
   // Enviar todas las transacciones en un solo sendTransaction
-  // Patron oficial: usar "transactions" (con S) y "to" en cada item
+  // MiniKit 1.9.6 usa "transaction" (sin S) y "to" en cada item
   const result: any = await (MiniKit as any).commandsAsync.sendTransaction({
-    chainId: 480,
-    transactions,
+    transaction: transactions,
   });
 
   const finalPayload = result?.finalPayload;
