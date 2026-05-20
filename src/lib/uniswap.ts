@@ -1,17 +1,11 @@
 'use client';
 
-import { encodeFunctionData, parseUnits, formatUnits, maxUint256 } from 'viem';
+import { encodeFunctionData, parseUnits, formatUnits } from 'viem';
 import { MiniKit } from '@worldcoin/minikit-js';
 import { publicClient } from './viem';
 import { ERC20_ABI, QUOTER_V2_ABI, SWAP_ROUTER_02_ABI } from './abis';
-import {
-  UNISWAP_V3,
-  FEE_TIERS,
-  FEE_RECEIVER,
-  SWAP_FEE_BPS,
-  SWAP_FEE_DISCOUNTED_BPS,
-} from '@/config/chain';
-import { NXCH_ADDRESS, type SwapToken } from '@/config/tokens';
+import { UNISWAP_V3, FEE_TIERS } from '@/config/chain';
+import type { SwapToken } from '@/config/tokens';
 
 // ============================================================
 // TIPOS
@@ -20,33 +14,11 @@ export type QuoteResult = {
   amountOut: bigint;
   amountOutFormatted: string;
   feeTier: number;
-  feeBps: number;
-  feeAmount: bigint;
-  feeAmountFormatted: string;
-  netAmountIn: bigint;
-  hasDiscount: boolean;
   rate: number;
 };
 
 // ============================================================
-// NXCH DISCOUNT CHECK
-// ============================================================
-export async function hasNxchDiscount(walletAddress: string): Promise<boolean> {
-  try {
-    const balance = (await publicClient.readContract({
-      address: NXCH_ADDRESS,
-      abi: ERC20_ABI,
-      functionName: 'balanceOf',
-      args: [walletAddress as `0x${string}`],
-    })) as bigint;
-    return balance > 0n;
-  } catch {
-    return false;
-  }
-}
-
-// ============================================================
-// FIND BEST POOL (probar los 3 fee tiers)
+// QUOTE - busca el mejor pool en los 3 fee tiers
 // ============================================================
 async function findBestQuote(
   tokenIn: string,
@@ -74,7 +46,6 @@ async function findBestQuote(
         });
 
         const amountOut = result[0] as bigint;
-
         if (!best || amountOut > best.amountOut) {
           best = { amountOut, feeTier };
         }
@@ -87,9 +58,6 @@ async function findBestQuote(
   return best;
 }
 
-// ============================================================
-// QUOTE
-// ============================================================
 export async function getSwapQuote(
   walletAddress: string,
   tokenIn: SwapToken,
@@ -109,19 +77,10 @@ export async function getSwapQuote(
 
   if (amountIn === 0n) return null;
 
-  // Verificar descuento por NXCH
-  const hasDiscount = await hasNxchDiscount(walletAddress);
-  const feeBps = hasDiscount ? SWAP_FEE_DISCOUNTED_BPS : SWAP_FEE_BPS;
-
-  // Calcular fee y monto neto a swapear
-  const feeAmount = (amountIn * BigInt(feeBps)) / 10000n;
-  const netAmountIn = amountIn - feeAmount;
-
-  // Pedir cotización por el monto NETO (después del fee)
   const best = await findBestQuote(
     tokenIn.address,
     tokenOut.address,
-    netAmountIn
+    amountIn
   );
 
   if (!best) return null;
@@ -135,97 +94,71 @@ export async function getSwapQuote(
     amountOut: best.amountOut,
     amountOutFormatted: formatUnits(best.amountOut, tokenOut.decimals),
     feeTier: best.feeTier,
-    feeBps,
-    feeAmount,
-    feeAmountFormatted: formatUnits(feeAmount, tokenIn.decimals),
-    netAmountIn,
-    hasDiscount,
     rate: amountInNum > 0 ? amountOutNum / amountInNum : 0,
   };
 }
 
 // ============================================================
-// SWAP EXECUTION
-// Sigue el patron OFICIAL de World docs:
-// https://docs.world.org/mini-apps/commands/send-transaction
+// CHECK ALLOWANCE - decide si necesita approve o no
 // ============================================================
+export async function checkAllowance(
+  walletAddress: string,
+  tokenAddress: string,
+  amount: bigint
+): Promise<boolean> {
+  try {
+    const allowance = (await publicClient.readContract({
+      address: tokenAddress as `0x${string}`,
+      abi: ERC20_ABI,
+      functionName: 'allowance',
+      args: [
+        walletAddress as `0x${string}`,
+        UNISWAP_V3.SWAP_ROUTER_02 as `0x${string}`,
+      ],
+    })) as bigint;
 
-// Slippage: 0.5% default
+    return allowance >= amount;
+  } catch (err) {
+    console.error('[NexChain] Allowance check failed:', err);
+    return false;
+  }
+}
+
+// ============================================================
+// SLIPPAGE - 0.5% default
+// ============================================================
 function applySlippage(amountOut: bigint, slippageBps: number = 50): bigint {
   return (amountOut * BigInt(10000 - slippageBps)) / 10000n;
 }
 
-const PERMIT2 = UNISWAP_V3.PERMIT2;
-
-// ABI de Permit2 approve (allowance transfer)
-const PERMIT2_APPROVE_ABI = [
-  {
-    name: 'approve',
-    type: 'function',
-    inputs: [
-      { name: 'token', type: 'address' },
-      { name: 'spender', type: 'address' },
-      { name: 'amount', type: 'uint160' },
-      { name: 'expiration', type: 'uint48' },
-    ],
-    outputs: [],
-    stateMutability: 'nonpayable',
-  },
-] as const;
-
-export type SwapResult = {
-  txHash: string;
-  success: boolean;
-};
-
-export async function executeSwap(
-  walletAddress: string,
-  tokenIn: SwapToken,
-  tokenOut: SwapToken,
-  amountInStr: string,
-  quote: QuoteResult
-): Promise<SwapResult> {
-  const amountIn = parseUnits(amountInStr, tokenIn.decimals);
-
-  // ============================================================
-  // MODO TEST EXTREMO: SOLO HACER UN TRANSFER DE 1 WEI
-  // Para verificar que MiniKit funciona
-  // ============================================================
-  const transactions: any[] = [
-    {
-      to: tokenIn.address,
-      data: encodeFunctionData({
-        abi: ERC20_ABI,
-        functionName: 'transfer',
-        args: [FEE_RECEIVER as `0x${string}`, 1n], // solo 1 wei!
-      }),
-    },
-  ];
-
-  // Verificar que MiniKit este instalado
+// ============================================================
+// SEND TRANSACTION - helper unificado
+// Convierte bigints a string y agrega timeout
+// ============================================================
+async function sendSingleTransaction(tx: {
+  to: string;
+  data: string;
+  value?: string;
+}): Promise<string> {
   if (typeof window === 'undefined') {
     throw new Error('No estás en un navegador');
   }
   if (!MiniKit.isInstalled()) {
-    throw new Error('MiniKit no está instalado. Abrí esta app dentro de World App.');
+    throw new Error('MiniKit no está instalado. Abrí la app dentro de World App.');
   }
 
-  console.log('[NexChain] Enviando transaccion:', {
-    walletAddress,
-    tokenIn: tokenIn.symbol,
-    tokenOut: tokenOut.symbol,
-    amountIn: amountInStr,
-    txCount: transactions.length,
-    transactions: JSON.stringify(transactions),
-  });
+  // Asegurar que value sea string (no bigint)
+  const safeTx = {
+    to: tx.to,
+    data: tx.data,
+    value: tx.value || '0',
+  };
 
-  // Enviar todas las transacciones en un solo sendTransaction
-  // MiniKit 1.9.6 usa "transaction" (sin S) y "to" en cada item
+  console.log('[NexChain] sendTransaction:', safeTx);
 
-  // Timeout para no colgarse para siempre
-  const TIMEOUT_MS = 90_000; // 90 segundos
+  const TIMEOUT_MS = 90_000;
   const txPromise = (MiniKit as any).commandsAsync.sendTransaction({
-    transaction: transactions,
+    transaction: [safeTx],
   });
 
   const timeoutPromise = new Promise((_, reject) =>
@@ -233,7 +166,7 @@ export async function executeSwap(
       () =>
         reject(
           new Error(
-            'Tiempo de espera agotado. World App no respondió. Verificá tu conexión.'
+            'Tiempo de espera agotado (90s). World App no respondió.'
           )
         ),
       TIMEOUT_MS
@@ -242,12 +175,11 @@ export async function executeSwap(
 
   const result: any = await Promise.race([txPromise, timeoutPromise]);
 
-  console.log('[NexChain] Respuesta de MiniKit:', JSON.stringify(result));
+  console.log('[NexChain] MiniKit response:', result);
 
   const finalPayload = result?.finalPayload;
-
   if (!finalPayload) {
-    throw new Error('No hubo respuesta de World App');
+    throw new Error('Sin respuesta de World App');
   }
 
   if (finalPayload.status === 'error') {
@@ -259,12 +191,83 @@ export async function executeSwap(
     throw new Error(errMsg);
   }
 
-  return {
-    txHash:
-      finalPayload.transaction_id ||
-      finalPayload.userOpHash ||
-      finalPayload.hash ||
-      '',
-    success: true,
-  };
+  return (
+    finalPayload.transaction_id ||
+    finalPayload.userOpHash ||
+    finalPayload.hash ||
+    ''
+  );
+}
+
+// ============================================================
+// STEP 1: APPROVE (transacción única)
+// ============================================================
+export async function executeApprove(
+  tokenIn: SwapToken,
+  amountInStr: string
+): Promise<string> {
+  const amountIn = parseUnits(amountInStr, tokenIn.decimals);
+
+  const data = encodeFunctionData({
+    abi: ERC20_ABI,
+    functionName: 'approve',
+    args: [
+      UNISWAP_V3.SWAP_ROUTER_02 as `0x${string}`,
+      amountIn,
+    ],
+  });
+
+  console.log('[NexChain] APPROVE:', {
+    token: tokenIn.symbol,
+    spender: UNISWAP_V3.SWAP_ROUTER_02,
+    amount: amountIn.toString(),
+  });
+
+  return sendSingleTransaction({
+    to: tokenIn.address,
+    data,
+  });
+}
+
+// ============================================================
+// STEP 2: SWAP (transacción única)
+// ============================================================
+export async function executeSwapOnly(
+  walletAddress: string,
+  tokenIn: SwapToken,
+  tokenOut: SwapToken,
+  amountInStr: string,
+  quote: QuoteResult
+): Promise<string> {
+  const amountIn = parseUnits(amountInStr, tokenIn.decimals);
+  const amountOutMinimum = applySlippage(quote.amountOut, 50);
+
+  const data = encodeFunctionData({
+    abi: SWAP_ROUTER_02_ABI,
+    functionName: 'exactInputSingle',
+    args: [
+      {
+        tokenIn: tokenIn.address as `0x${string}`,
+        tokenOut: tokenOut.address as `0x${string}`,
+        fee: quote.feeTier,
+        recipient: walletAddress as `0x${string}`,
+        amountIn,
+        amountOutMinimum,
+        sqrtPriceLimitX96: 0n,
+      },
+    ],
+  });
+
+  console.log('[NexChain] SWAP:', {
+    tokenIn: tokenIn.symbol,
+    tokenOut: tokenOut.symbol,
+    amountIn: amountIn.toString(),
+    amountOutMinimum: amountOutMinimum.toString(),
+    feeTier: quote.feeTier,
+  });
+
+  return sendSingleTransaction({
+    to: UNISWAP_V3.SWAP_ROUTER_02,
+    data,
+  });
 }

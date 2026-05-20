@@ -16,20 +16,28 @@ import {
   SWAP_TOKENS,
   type SwapToken,
 } from '@/config/tokens';
-import {
-  WORLDCHAIN,
-  SWAP_FEE_PERCENT,
-  SWAP_FEE_DISCOUNTED_PERCENT,
-} from '@/config/chain';
+import { WORLDCHAIN } from '@/config/chain';
 import {
   getSwapQuote,
-  executeSwap,
+  checkAllowance,
+  executeApprove,
+  executeSwapOnly,
   type QuoteResult,
 } from '@/lib/uniswap';
 import { useAllTokenBalances } from '@/hooks/useAllTokenBalances';
 import { TokenLogo } from './TokenLogo';
+import { parseUnits } from 'viem';
 
-type SwapStatus = 'idle' | 'quoting' | 'swapping' | 'success' | 'error';
+type SwapStatus =
+  | 'idle'
+  | 'quoting'
+  | 'checking_allowance'
+  | 'needs_approve'
+  | 'approving'
+  | 'ready_to_swap'
+  | 'swapping'
+  | 'success'
+  | 'error';
 
 export function SwapModal({
   walletAddress,
@@ -104,21 +112,89 @@ export function SwapModal({
     return () => clearTimeout(id);
   }, [amount, from, to, walletAddress]);
 
-  const swap = async () => {
+  // Cuando hay quote nuevo, verificar si necesita approve
+  useEffect(() => {
+    if (!quote || !amount || parseFloat(amount) <= 0) return;
+    if (status === 'swapping' || status === 'approving') return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        setStatus('checking_allowance');
+        const amountIn = parseUnits(amount, from.decimals);
+        const hasAllowance = await checkAllowance(
+          walletAddress,
+          from.address,
+          amountIn
+        );
+        if (cancelled) return;
+        setStatus(hasAllowance ? 'ready_to_swap' : 'needs_approve');
+      } catch (err) {
+        console.error('Allowance check error:', err);
+        if (!cancelled) setStatus('needs_approve'); // fallback
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [quote, amount, from, walletAddress]);
+
+  // PASO 1: APPROVE (transacción separada)
+  const handleApprove = async () => {
+    if (!quote) return;
+    setError(null);
+    setStatus('approving');
+    try {
+      console.log('[NexChain] Starting approve...');
+      const txId = await executeApprove(from, amount);
+      console.log('[NexChain] Approve tx:', txId);
+
+      // Esperar un poco a que se mine y volver a chequear allowance
+      await new Promise((res) => setTimeout(res, 2000));
+
+      const amountIn = parseUnits(amount, from.decimals);
+      const hasAllowance = await checkAllowance(
+        walletAddress,
+        from.address,
+        amountIn
+      );
+
+      if (hasAllowance) {
+        setStatus('ready_to_swap');
+      } else {
+        // Puede que aún no se haya minado, esperar más
+        await new Promise((res) => setTimeout(res, 3000));
+        const recheck = await checkAllowance(
+          walletAddress,
+          from.address,
+          amountIn
+        );
+        setStatus(recheck ? 'ready_to_swap' : 'needs_approve');
+      }
+    } catch (err: any) {
+      console.error('Approve error:', err);
+      setError(err?.message || 'No se pudo aprobar el token');
+      setStatus('error');
+    }
+  };
+
+  // PASO 2: SWAP (transacción separada)
+  const handleSwap = async () => {
     if (!quote) return;
     setError(null);
     setStatus('swapping');
-
     try {
-      const result = await executeSwap(
+      console.log('[NexChain] Starting swap...');
+      const txId = await executeSwapOnly(
         walletAddress,
         from,
         to,
         amount,
         quote
       );
-
-      setTxHash(result.txHash);
+      console.log('[NexChain] Swap tx:', txId);
+      setTxHash(txId);
       setStatus('success');
     } catch (err: any) {
       console.error('Swap error:', err);
@@ -287,33 +363,11 @@ export function SwapModal({
                   label="Tasa"
                   value={`1 ${from.symbol} = ${quote.rate.toFixed(6)} ${to.symbol}`}
                 />
-                <Row
-                  label="Fee NexChain"
-                  value={
-                    <span className="flex items-center gap-1">
-                      {quote.hasDiscount && (
-                        <Sparkles className="w-3 h-3 text-nex-green" />
-                      )}
-                      {(quote.hasDiscount
-                        ? SWAP_FEE_DISCOUNTED_PERCENT
-                        : SWAP_FEE_PERCENT)}%
-                      {quote.hasDiscount && (
-                        <span className="text-[9px] text-nex-green ml-1">
-                          (descuento NXCH)
-                        </span>
-                      )}
-                    </span>
-                  }
-                />
                 <Row label="Slippage" value={`${(slippage / 100).toFixed(2)}%`} />
-                {!quote.hasDiscount && (
-                  <div className="mt-2 p-2 rounded-lg bg-nex-green/10 border border-nex-green/30 flex items-center gap-2">
-                    <Sparkles className="w-3.5 h-3.5 text-nex-green shrink-0" />
-                    <span className="text-[10px] text-gray-300 leading-tight">
-                      Tené NXCH y pagá solo 0.1% de fee en cada swap
-                    </span>
-                  </div>
-                )}
+                <Row
+                  label="Pool fee"
+                  value={`${(quote.feeTier / 10000).toFixed(2)}%`}
+                />
               </div>
             )}
 
@@ -334,37 +388,76 @@ export function SwapModal({
               </div>
             )}
 
-            {/* Swap button */}
-            <button
-              onClick={swap}
-              disabled={!canSwap}
-              className="w-full py-4 rounded-2xl bg-gradient-to-r from-nex-green to-nex-cyan text-black font-cyber font-black text-base shadow-glow-green active:scale-[0.98] transition-transform disabled:opacity-40 disabled:shadow-none flex items-center justify-center gap-2"
-            >
-              {status === 'swapping' ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  Procesando...
-                </>
-              ) : status === 'quoting' ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  Cotizando...
-                </>
-              ) : isInsufficientBalance ? (
-                'SALDO INSUFICIENTE'
-              ) : !quote && amount ? (
-                'SIN LIQUIDEZ'
-              ) : !amount ? (
-                'INGRESÁ UN MONTO'
-              ) : (
-                `SWAP ${from.symbol} → ${to.symbol}`
-              )}
-            </button>
+            {/* Botón dinámico: Approve o Swap según el estado */}
+            {status === 'needs_approve' || status === 'approving' ? (
+              <button
+                onClick={handleApprove}
+                disabled={
+                  status === 'approving' || isInsufficientBalance || !quote
+                }
+                className="w-full py-4 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 text-black font-cyber font-black text-base shadow-lg active:scale-[0.98] transition-transform disabled:opacity-40 disabled:shadow-none flex items-center justify-center gap-2"
+              >
+                {status === 'approving' ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Aprobando...
+                  </>
+                ) : (
+                  `1. APROBAR ${from.symbol}`
+                )}
+              </button>
+            ) : (
+              <button
+                onClick={handleSwap}
+                disabled={
+                  !quote ||
+                  isInsufficientBalance ||
+                  status === 'swapping' ||
+                  status === 'quoting' ||
+                  status === 'checking_allowance' ||
+                  parseFloat(amount || '0') <= 0 ||
+                  status !== 'ready_to_swap'
+                }
+                className="w-full py-4 rounded-2xl bg-gradient-to-r from-nex-green to-nex-cyan text-black font-cyber font-black text-base shadow-glow-green active:scale-[0.98] transition-transform disabled:opacity-40 disabled:shadow-none flex items-center justify-center gap-2"
+              >
+                {status === 'swapping' ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Procesando swap...
+                  </>
+                ) : status === 'quoting' ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Cotizando...
+                  </>
+                ) : status === 'checking_allowance' ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Verificando...
+                  </>
+                ) : isInsufficientBalance ? (
+                  'SALDO INSUFICIENTE'
+                ) : !quote && amount ? (
+                  'SIN LIQUIDEZ'
+                ) : !amount ? (
+                  'INGRESÁ UN MONTO'
+                ) : (
+                  `SWAP ${from.symbol} → ${to.symbol}`
+                )}
+              </button>
+            )}
+
+            {/* Indicador de paso 2 cuando aprobando */}
+            {status === 'needs_approve' && (
+              <p className="text-[11px] text-center text-amber-400 leading-relaxed">
+                Paso 1 de 2: Aprobá el uso de {from.symbol} en Uniswap.
+                <br />
+                Después podrás hacer el swap.
+              </p>
+            )}
 
             <p className="text-[10px] text-center text-gray-500 leading-relaxed">
               Los swaps se ejecutan en Uniswap V3 sobre World Chain.
-              <br />
-              NexChain cobra un fee del 0.3% (0.1% con NXCH).
             </p>
           </>
         )}
