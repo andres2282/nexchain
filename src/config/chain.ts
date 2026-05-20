@@ -12,14 +12,18 @@ export const APP_CONFIG = {
 };
 
 // === FEES DEL SWAP ===
-// Wallet de NexChain que recibe el fee de cada swap
-export const FEE_RECEIVER = '0x3de83b386c983426547b3b42e50b810ab9a25deb';
+// Wallet de NexChain que recibe el fee de cada swap (MetaMask de Andres)
+export const FEE_RECEIVER = '0x010110EE7787F5012519a991Ef8133716bE2d590';
 
-// Fee base: 0.3% (30 basis points)
-export const SWAP_FEE_BPS = 30;
+// Fee base: 0.2% (20 basis points)
+export const SWAP_FEE_BPS = 20;
 
 // Fee con descuento (si tenes NXCH): 0.1% (10 basis points)
 export const SWAP_FEE_DISCOUNTED_BPS = 10;
+
+// Versiones string para usar con Holdstation SDK (que pide string)
+export const SWAP_FEE_PERCENT = '0.2';
+export const SWAP_FEE_DISCOUNTED_PERCENT = '0.1';
 
 // === UNISWAP V3 EN WORLD CHAIN ===
 // Direcciones oficiales: https://docs.uniswap.org/contracts/v3/reference/deployments/WorldChain-deployments

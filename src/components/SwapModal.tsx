@@ -16,10 +16,14 @@ import {
   SWAP_TOKENS,
   type SwapToken,
 } from '@/config/tokens';
-import { WORLDCHAIN } from '@/config/chain';
+import {
+  WORLDCHAIN,
+  SWAP_FEE_PERCENT,
+  SWAP_FEE_DISCOUNTED_PERCENT,
+} from '@/config/chain';
 import {
   getSwapQuote,
-  buildSwapTransactions,
+  executeSwap,
   type QuoteResult,
 } from '@/lib/uniswap';
 import { useAllTokenBalances } from '@/hooks/useAllTokenBalances';
@@ -106,35 +110,21 @@ export function SwapModal({
     setStatus('swapping');
 
     try {
-      const txs = await buildSwapTransactions(
+      const result = await executeSwap(
         walletAddress,
         from,
         to,
-        quote,
-        slippage
+        amount,
+        quote
       );
 
-      const transaction = txs.map((tx) => ({
-        address: tx.address,
-        abi: tx.abi,
-        functionName: tx.functionName,
-        args: tx.args,
-      }));
-
-      const result = await (MiniKit as any).commandsAsync.sendTransaction({
-        transaction,
-      });
-
-      const finalPayload = result?.finalPayload;
-      if (!finalPayload || finalPayload.status === 'error') {
-        throw new Error(finalPayload?.message || 'Transacción cancelada');
-      }
-
-      setTxHash(finalPayload.transaction_id || null);
+      setTxHash(result.txHash);
       setStatus('success');
     } catch (err: any) {
       console.error('Swap error:', err);
-      setError(err?.message || 'No se pudo completar el swap');
+      const errMsg =
+        err?.message || err?.toString() || 'No se pudo completar el swap';
+      setError(errMsg);
       setStatus('error');
     }
   };
@@ -304,7 +294,9 @@ export function SwapModal({
                       {quote.hasDiscount && (
                         <Sparkles className="w-3 h-3 text-nex-green" />
                       )}
-                      {(quote.feeBps / 100).toFixed(2)}%
+                      {(quote.hasDiscount
+                        ? SWAP_FEE_DISCOUNTED_PERCENT
+                        : SWAP_FEE_PERCENT)}%
                       {quote.hasDiscount && (
                         <span className="text-[9px] text-nex-green ml-1">
                           (descuento NXCH)

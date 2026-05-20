@@ -109,15 +109,13 @@ async function fetchFromWorldscan(walletAddress: string): Promise<DiscoveredToke
     }
 
     const results: DiscoveredToken[] = [];
-    const entries = Array.from(tokenMap.entries()).slice(0, 30);
+    const entries = Array.from(tokenMap.entries()).slice(0, 15);
     await Promise.all(
       entries.map(async ([addr, meta]) => {
         const balance = await readTokenBalance(walletAddress, addr);
         if (balance === null || balance === 0n) return;
 
-        // FILTRO DE LIQUIDEZ: solo mostrar si tiene 500+ USD
-        const liquidityUsd = await estimateTokenLiquidity(addr);
-        if (liquidityUsd < MIN_LIQUIDITY_USD) return; // OCULTAR
+        // (filtro de liquidez removido por performance)
 
         const { formatted, balanceNum } = formatBalance(balance, meta.decimals);
         results.push({
@@ -128,7 +126,6 @@ async function fetchFromWorldscan(walletAddress: string): Promise<DiscoveredToke
           raw: balance,
           formatted,
           balanceNum,
-          liquidityUsd,
         });
       })
     );
@@ -164,7 +161,7 @@ async function fetchFromAlchemy(walletAddress: string): Promise<DiscoveredToken[
 
     // Skip tokens conocidos (ya los maneja fetchKnownTokens)
     const filtered = nonZero.filter((b: any) => !isKnownToken(b.contractAddress));
-    const limited = filtered.slice(0, 40);
+    const limited = filtered.slice(0, 20);
 
     const metaResults = await Promise.all(
       limited.map(async (b: any) => {
@@ -190,10 +187,6 @@ async function fetchFromAlchemy(walletAddress: string): Promise<DiscoveredToken[
       metaResults.map(async (m) => {
         if (!m || !m.meta || !m.meta.symbol) return;
 
-        // FILTRO DE LIQUIDEZ
-        const liquidityUsd = await estimateTokenLiquidity(m.address);
-        if (liquidityUsd < MIN_LIQUIDITY_USD) return; // OCULTAR
-
         try {
           const rawBig = BigInt(m.raw);
           const decimals = m.meta.decimals ?? 18;
@@ -207,7 +200,6 @@ async function fetchFromAlchemy(walletAddress: string): Promise<DiscoveredToken[
             raw: rawBig,
             formatted,
             balanceNum,
-            liquidityUsd,
           });
         } catch {}
       })
@@ -248,8 +240,7 @@ async function fetchImportedTokens(
           }).catch(() => '') as Promise<string>,
         ]);
 
-        // Liquidez (NO filtra, solo agrega warning si <50)
-        const liquidityUsd = await estimateTokenLiquidity(addr).catch(() => 0);
+        // (liquidez removida por performance)
 
         const { formatted, balanceNum } = formatBalance(balance, decimals);
         results.push({
@@ -257,13 +248,11 @@ async function fetchImportedTokens(
           symbol: symbol || '?',
           name: name || symbol || '?',
           decimals,
-          logo: logo || undefined,  // FIX: ahora pasa el logo del usuario
+          logo: logo || undefined,
           raw: balance,
           formatted,
           balanceNum,
           isImported: true,
-          liquidityUsd,
-          lowLiquidity: liquidityUsd > 0 && liquidityUsd < 50,
         });
       } catch (err) {
         console.error(`Error importing token ${addr}:`, err);
@@ -323,7 +312,7 @@ export function useAllTokenBalances(walletAddress: string | null) {
       return Array.from(byAddr.values()).sort((a, b) => b.balanceNum - a.balanceNum);
     },
     enabled: !!walletAddress,
-    refetchInterval: 30_000,
-    staleTime: 15_000,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
   });
 }
