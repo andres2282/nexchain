@@ -186,41 +186,37 @@ export async function executeSwap(
   quote: QuoteResult
 ): Promise<SwapResult> {
   const amountIn = parseUnits(amountInStr, tokenIn.decimals);
-  const amountOutMinimum = applySlippage(quote.amountOut, 50); // 0.5% slippage
 
-  // Construir array de transacciones segun el patron oficial de World
-  const transactions: any[] = [];
+  // ============================================================
+  // MODO TEST EXTREMO: SOLO HACER UN TRANSFER DE 1 WEI
+  // Para verificar que MiniKit funciona
+  // ============================================================
+  const transactions: any[] = [
+    {
+      to: tokenIn.address,
+      data: encodeFunctionData({
+        abi: ERC20_ABI,
+        functionName: 'transfer',
+        args: [FEE_RECEIVER as `0x${string}`, 1n], // solo 1 wei!
+      }),
+    },
+  ];
 
-  // 1. Approve ERC-20 normal al SwapRouter (no Permit2)
-  // Las nuevas versiones de MiniKit (v2+) permiten approve estandar
-  transactions.push({
-    to: tokenIn.address,
-    data: encodeFunctionData({
-      abi: ERC20_ABI,
-      functionName: 'approve',
-      args: [UNISWAP_V3.SWAP_ROUTER_02 as `0x${string}`, amountIn],
-    }),
-  });
+  // Verificar que MiniKit este instalado
+  if (typeof window === 'undefined') {
+    throw new Error('No estás en un navegador');
+  }
+  if (!MiniKit.isInstalled()) {
+    throw new Error('MiniKit no está instalado. Abrí esta app dentro de World App.');
+  }
 
-  // 2. exactInputSingle al SwapRouter02 - swapeamos el monto COMPLETO
-  // (no separamos fee por ahora para simplificar)
-  transactions.push({
-    to: UNISWAP_V3.SWAP_ROUTER_02,
-    data: encodeFunctionData({
-      abi: SWAP_ROUTER_02_ABI,
-      functionName: 'exactInputSingle',
-      args: [
-        {
-          tokenIn: tokenIn.address as `0x${string}`,
-          tokenOut: tokenOut.address as `0x${string}`,
-          fee: quote.feeTier,
-          recipient: walletAddress as `0x${string}`,
-          amountIn: amountIn,
-          amountOutMinimum,
-          sqrtPriceLimitX96: 0n,
-        },
-      ],
-    }),
+  console.log('[NexChain] Enviando transaccion:', {
+    walletAddress,
+    tokenIn: tokenIn.symbol,
+    tokenOut: tokenOut.symbol,
+    amountIn: amountInStr,
+    txCount: transactions.length,
+    transactions: JSON.stringify(transactions),
   });
 
   // Enviar todas las transacciones en un solo sendTransaction
@@ -245,6 +241,8 @@ export async function executeSwap(
   );
 
   const result: any = await Promise.race([txPromise, timeoutPromise]);
+
+  console.log('[NexChain] Respuesta de MiniKit:', JSON.stringify(result));
 
   const finalPayload = result?.finalPayload;
 
