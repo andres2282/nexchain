@@ -1,45 +1,35 @@
 'use client';
 
-import { parseUnits, formatUnits } from 'viem';
+import { encodeFunctionData, parseUnits, formatUnits, maxUint256 } from 'viem';
 import { MiniKit } from '@worldcoin/minikit-js';
-import { Client, Multicall3, Quoter, SwapHelper } from '@holdstation/worldchain-viem';
-import { config, inmemoryTokenStorage } from '@holdstation/worldchain-sdk';
 import { publicClient } from './viem';
-import { ERC20_ABI } from './abis';
+import { ERC20_ABI, QUOTER_V2_ABI, SWAP_ROUTER_02_ABI } from './abis';
 import {
+  UNISWAP_V3,
+  FEE_TIERS,
   FEE_RECEIVER,
-  SWAP_FEE_PERCENT,
-  SWAP_FEE_DISCOUNTED_PERCENT,
+  SWAP_FEE_BPS,
+  SWAP_FEE_DISCOUNTED_BPS,
 } from '@/config/chain';
 import { NXCH_ADDRESS, type SwapToken } from '@/config/tokens';
 
 // ============================================================
-// Setup del cliente Holdstation (singleton lazy)
+// TIPOS
 // ============================================================
-let _client: Client | null = null;
-let _swapHelper: SwapHelper | null = null;
-
-function getClient(): Client {
-  if (!_client) {
-    _client = new Client(publicClient);
-    config.client = _client;
-    config.multicall3 = new Multicall3(publicClient);
-  }
-  return _client;
-}
-
-function getSwapHelper(): SwapHelper {
-  if (!_swapHelper) {
-    const client = getClient();
-    _swapHelper = new SwapHelper(client, {
-      tokenStorage: inmemoryTokenStorage,
-    });
-  }
-  return _swapHelper;
-}
+export type QuoteResult = {
+  amountOut: bigint;
+  amountOutFormatted: string;
+  feeTier: number;
+  feeBps: number;
+  feeAmount: bigint;
+  feeAmountFormatted: string;
+  netAmountIn: bigint;
+  hasDiscount: boolean;
+  rate: number;
+};
 
 // ============================================================
-// Detección de descuento NXCH
+// NXCH DISCOUNT CHECK
 // ============================================================
 export async function hasNxchDiscount(walletAddress: string): Promise<boolean> {
   try {
@@ -56,18 +46,50 @@ export async function hasNxchDiscount(walletAddress: string): Promise<boolean> {
 }
 
 // ============================================================
-// Quote (cotización)
+// FIND BEST POOL (probar los 3 fee tiers)
 // ============================================================
-export type QuoteResult = {
-  amountOut: string;
-  amountOutFormatted: string;
-  rate: number;
-  feePercent: string;
-  hasDiscount: boolean;
-  // Datos crudos para ejecutar el swap
-  rawQuote: any;
-};
+async function findBestQuote(
+  tokenIn: string,
+  tokenOut: string,
+  amountIn: bigint
+): Promise<{ amountOut: bigint; feeTier: number } | null> {
+  let best: { amountOut: bigint; feeTier: number } | null = null;
 
+  await Promise.all(
+    FEE_TIERS.map(async (feeTier) => {
+      try {
+        const { result } = await publicClient.simulateContract({
+          address: UNISWAP_V3.QUOTER_V2 as `0x${string}`,
+          abi: QUOTER_V2_ABI,
+          functionName: 'quoteExactInputSingle',
+          args: [
+            {
+              tokenIn: tokenIn as `0x${string}`,
+              tokenOut: tokenOut as `0x${string}`,
+              amountIn,
+              fee: feeTier,
+              sqrtPriceLimitX96: 0n,
+            },
+          ],
+        });
+
+        const amountOut = result[0] as bigint;
+
+        if (!best || amountOut > best.amountOut) {
+          best = { amountOut, feeTier };
+        }
+      } catch {
+        // Pool no existe en este fee tier
+      }
+    })
+  );
+
+  return best;
+}
+
+// ============================================================
+// QUOTE
+// ============================================================
 export async function getSwapQuote(
   walletAddress: string,
   tokenIn: SwapToken,
@@ -75,58 +97,82 @@ export async function getSwapQuote(
   amountInStr: string
 ): Promise<QuoteResult | null> {
   if (!amountInStr || parseFloat(amountInStr) <= 0) return null;
-  if (tokenIn.address.toLowerCase() === tokenOut.address.toLowerCase()) return null;
+  if (tokenIn.address.toLowerCase() === tokenOut.address.toLowerCase())
+    return null;
 
-  // Detectar descuento por NXCH
-  const hasDiscount = await hasNxchDiscount(walletAddress);
-  const feePercent = hasDiscount
-    ? SWAP_FEE_DISCOUNTED_PERCENT
-    : SWAP_FEE_PERCENT;
-
+  let amountIn: bigint;
   try {
-    const swapHelper = getSwapHelper();
-
-    const params = {
-      tokenIn: tokenIn.address,
-      tokenOut: tokenOut.address,
-      amountIn: amountInStr,
-      slippage: '0.5', // 0.5% slippage default
-      fee: feePercent,
-    };
-
-    const quote: any = await swapHelper.quote(params);
-
-    if (!quote) return null;
-
-    // Parsear amount out
-    const amountOutRaw =
-      quote.outAmount || quote.amountOut || quote.outputAmount || '0';
-    const amountOutFormatted = formatUnits(
-      BigInt(amountOutRaw),
-      tokenOut.decimals
-    );
-
-    const amountInNum = parseFloat(amountInStr);
-    const amountOutNum = parseFloat(amountOutFormatted);
-    const rate = amountInNum > 0 ? amountOutNum / amountInNum : 0;
-
-    return {
-      amountOut: amountOutRaw.toString(),
-      amountOutFormatted,
-      rate,
-      feePercent,
-      hasDiscount,
-      rawQuote: quote,
-    };
-  } catch (err: any) {
-    console.error('Quote error:', err?.message || err);
+    amountIn = parseUnits(amountInStr, tokenIn.decimals);
+  } catch {
     return null;
   }
+
+  if (amountIn === 0n) return null;
+
+  // Verificar descuento por NXCH
+  const hasDiscount = await hasNxchDiscount(walletAddress);
+  const feeBps = hasDiscount ? SWAP_FEE_DISCOUNTED_BPS : SWAP_FEE_BPS;
+
+  // Calcular fee y monto neto a swapear
+  const feeAmount = (amountIn * BigInt(feeBps)) / 10000n;
+  const netAmountIn = amountIn - feeAmount;
+
+  // Pedir cotización por el monto NETO (después del fee)
+  const best = await findBestQuote(
+    tokenIn.address,
+    tokenOut.address,
+    netAmountIn
+  );
+
+  if (!best) return null;
+
+  const amountInNum = parseFloat(formatUnits(amountIn, tokenIn.decimals));
+  const amountOutNum = parseFloat(
+    formatUnits(best.amountOut, tokenOut.decimals)
+  );
+
+  return {
+    amountOut: best.amountOut,
+    amountOutFormatted: formatUnits(best.amountOut, tokenOut.decimals),
+    feeTier: best.feeTier,
+    feeBps,
+    feeAmount,
+    feeAmountFormatted: formatUnits(feeAmount, tokenIn.decimals),
+    netAmountIn,
+    hasDiscount,
+    rate: amountInNum > 0 ? amountOutNum / amountInNum : 0,
+  };
 }
 
 // ============================================================
-// Ejecutar swap
+// SWAP EXECUTION
+// Sigue el patron OFICIAL de World docs:
+// https://docs.world.org/mini-apps/commands/send-transaction
 // ============================================================
+
+// Slippage: 0.5% default
+function applySlippage(amountOut: bigint, slippageBps: number = 50): bigint {
+  return (amountOut * BigInt(10000 - slippageBps)) / 10000n;
+}
+
+const PERMIT2 = UNISWAP_V3.PERMIT2;
+
+// ABI de Permit2 approve (allowance transfer)
+const PERMIT2_APPROVE_ABI = [
+  {
+    name: 'approve',
+    type: 'function',
+    inputs: [
+      { name: 'token', type: 'address' },
+      { name: 'spender', type: 'address' },
+      { name: 'amount', type: 'uint160' },
+      { name: 'expiration', type: 'uint48' },
+    ],
+    outputs: [],
+    stateMutability: 'nonpayable',
+  },
+] as const;
+
 export type SwapResult = {
   txHash: string;
   success: boolean;
@@ -139,46 +185,89 @@ export async function executeSwap(
   amountInStr: string,
   quote: QuoteResult
 ): Promise<SwapResult> {
-  const swapHelper = getSwapHelper();
+  const amountIn = parseUnits(amountInStr, tokenIn.decimals);
+  const amountOutMinimum = applySlippage(quote.amountOut, 50); // 0.5% slippage
 
-  const swapParams = {
-    tokenIn: tokenIn.address,
-    tokenOut: tokenOut.address,
-    amountIn: amountInStr,
-    slippage: '0.5',
-    fee: quote.feePercent,
-    feeReceiver: FEE_RECEIVER,
-    // Datos del quote
-    tx: {
-      data: quote.rawQuote.data,
-      to: quote.rawQuote.to,
-      value: quote.rawQuote.value || '0',
-    },
-    feeAmountOut: quote.rawQuote.addons?.feeAmountOut,
-  };
+  // Construir array de transacciones segun el patron oficial de World
+  const transactions: any[] = [];
 
-  // El SDK arma la transacción, pero la firmamos con MiniKit
-  // (porque estamos dentro de World App)
-  const minikitTx = {
-    address: swapParams.tx.to as `0x${string}`,
-    abi: [], // Usa data raw, no abi
-    functionName: '',
-    args: [],
-    data: swapParams.tx.data,
-    value: swapParams.tx.value?.toString() || '0',
-  };
+  // 1. Transfer del fee al wallet de NexChain (Andres MetaMask)
+  if (quote.feeAmount > 0n) {
+    transactions.push({
+      to: tokenIn.address,
+      data: encodeFunctionData({
+        abi: ERC20_ABI,
+        functionName: 'transfer',
+        args: [FEE_RECEIVER as `0x${string}`, quote.feeAmount],
+      }),
+    });
+  }
 
+  // 2. Permit2 approve: aprueba al SwapRouter02 a gastar tokens via Permit2
+  // World App tiene tokens pre-aprobados a Permit2, asi que solo necesitamos
+  // este paso para autorizar al SwapRouter
+  transactions.push({
+    to: PERMIT2,
+    data: encodeFunctionData({
+      abi: PERMIT2_APPROVE_ABI,
+      functionName: 'approve',
+      args: [
+        tokenIn.address as `0x${string}`,
+        UNISWAP_V3.SWAP_ROUTER_02 as `0x${string}`,
+        quote.netAmountIn, // uint160
+        0, // expiration: 0 = consumido en la misma tx
+      ],
+    }),
+  });
+
+  // 3. exactInputSingle al SwapRouter02
+  transactions.push({
+    to: UNISWAP_V3.SWAP_ROUTER_02,
+    data: encodeFunctionData({
+      abi: SWAP_ROUTER_02_ABI,
+      functionName: 'exactInputSingle',
+      args: [
+        {
+          tokenIn: tokenIn.address as `0x${string}`,
+          tokenOut: tokenOut.address as `0x${string}`,
+          fee: quote.feeTier,
+          recipient: walletAddress as `0x${string}`,
+          amountIn: quote.netAmountIn,
+          amountOutMinimum,
+          sqrtPriceLimitX96: 0n,
+        },
+      ],
+    }),
+  });
+
+  // Enviar todas las transacciones en un solo sendTransaction
+  // Patron oficial: usar "transactions" (con S) y "to" en cada item
   const result: any = await (MiniKit as any).commandsAsync.sendTransaction({
-    transaction: [minikitTx],
+    chainId: 480,
+    transactions,
   });
 
   const finalPayload = result?.finalPayload;
-  if (!finalPayload || finalPayload.status === 'error') {
-    throw new Error(finalPayload?.message || 'Swap cancelado');
+
+  if (!finalPayload) {
+    throw new Error('No hubo respuesta de World App');
+  }
+
+  if (finalPayload.status === 'error') {
+    const errMsg =
+      finalPayload.error_code ||
+      finalPayload.message ||
+      finalPayload.details ||
+      'Transacción rechazada';
+    throw new Error(errMsg);
   }
 
   return {
-    txHash: finalPayload.transaction_id || '',
+    txHash:
+      finalPayload.transaction_id ||
+      finalPayload.userOpHash ||
+      finalPayload.hash ||
+      '',
     success: true,
   };
 }
