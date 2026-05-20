@@ -147,11 +147,12 @@ async function sendSingleTransaction(tx: {
     throw new Error('MiniKit no está instalado. Abrí la app dentro de World App.');
   }
 
-  // Asegurar que value sea string (no bigint)
+  // Asegurar que value sea HEX string (no decimal, no bigint)
+  // MiniKit espera '0x0' no '0'
   const safeTx = {
     to: tx.to,
     data: tx.data,
-    value: tx.value || '0',
+    value: tx.value && tx.value !== '0' ? tx.value : '0x0',
   };
 
   console.log('[NexChain] sendTransaction:', safeTx);
