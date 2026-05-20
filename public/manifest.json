@@ -1,0 +1,9 @@
+{
+  "name": "NexChain",
+  "short_name": "NexChain",
+  "description": "Wallet simple para World Chain",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#05080F",
+  "theme_color": "#05080F"
+}
