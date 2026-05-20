@@ -191,36 +191,19 @@ export async function executeSwap(
   // Construir array de transacciones segun el patron oficial de World
   const transactions: any[] = [];
 
-  // 1. Transfer del fee al wallet de NexChain (Andres MetaMask)
-  if (quote.feeAmount > 0n) {
-    transactions.push({
-      to: tokenIn.address,
-      data: encodeFunctionData({
-        abi: ERC20_ABI,
-        functionName: 'transfer',
-        args: [FEE_RECEIVER as `0x${string}`, quote.feeAmount],
-      }),
-    });
-  }
-
-  // 2. Permit2 approve: aprueba al SwapRouter02 a gastar tokens via Permit2
-  // World App tiene tokens pre-aprobados a Permit2, asi que solo necesitamos
-  // este paso para autorizar al SwapRouter
+  // 1. Approve ERC-20 normal al SwapRouter (no Permit2)
+  // Las nuevas versiones de MiniKit (v2+) permiten approve estandar
   transactions.push({
-    to: PERMIT2,
+    to: tokenIn.address,
     data: encodeFunctionData({
-      abi: PERMIT2_APPROVE_ABI,
+      abi: ERC20_ABI,
       functionName: 'approve',
-      args: [
-        tokenIn.address as `0x${string}`,
-        UNISWAP_V3.SWAP_ROUTER_02 as `0x${string}`,
-        quote.netAmountIn, // uint160
-        0, // expiration: 0 = consumido en la misma tx
-      ],
+      args: [UNISWAP_V3.SWAP_ROUTER_02 as `0x${string}`, amountIn],
     }),
   });
 
-  // 3. exactInputSingle al SwapRouter02
+  // 2. exactInputSingle al SwapRouter02 - swapeamos el monto COMPLETO
+  // (no separamos fee por ahora para simplificar)
   transactions.push({
     to: UNISWAP_V3.SWAP_ROUTER_02,
     data: encodeFunctionData({
@@ -232,7 +215,7 @@ export async function executeSwap(
           tokenOut: tokenOut.address as `0x${string}`,
           fee: quote.feeTier,
           recipient: walletAddress as `0x${string}`,
-          amountIn: quote.netAmountIn,
+          amountIn: amountIn,
           amountOutMinimum,
           sqrtPriceLimitX96: 0n,
         },
@@ -242,9 +225,26 @@ export async function executeSwap(
 
   // Enviar todas las transacciones en un solo sendTransaction
   // MiniKit 1.9.6 usa "transaction" (sin S) y "to" en cada item
-  const result: any = await (MiniKit as any).commandsAsync.sendTransaction({
+
+  // Timeout para no colgarse para siempre
+  const TIMEOUT_MS = 90_000; // 90 segundos
+  const txPromise = (MiniKit as any).commandsAsync.sendTransaction({
     transaction: transactions,
   });
+
+  const timeoutPromise = new Promise((_, reject) =>
+    setTimeout(
+      () =>
+        reject(
+          new Error(
+            'Tiempo de espera agotado. World App no respondió. Verificá tu conexión.'
+          )
+        ),
+      TIMEOUT_MS
+    )
+  );
+
+  const result: any = await Promise.race([txPromise, timeoutPromise]);
 
   const finalPayload = result?.finalPayload;
 
