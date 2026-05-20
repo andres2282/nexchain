@@ -9,7 +9,6 @@ import {
   Check,
   X,
   Plus,
-  Trash2,
   Loader2,
   Sparkles,
   AlertTriangle,
@@ -31,7 +30,6 @@ export function WalletView({ walletAddress }: { walletAddress: string }) {
   const [showImport, setShowImport] = useState(false);
   const [showSwap, setShowSwap] = useState(false);
   const [swapFromSymbol, setSwapFromSymbol] = useState<string | undefined>();
-  const { remove: removeImported } = useImportedTokens();
 
   const enriched = useMemo(() => {
     if (!tokens) return [];
@@ -126,14 +124,6 @@ export function WalletView({ walletAddress }: { walletAddress: string }) {
                 key={t.address}
                 token={t}
                 onSwap={() => openSwap(t.symbol)}
-                onRemove={
-                  t.isImported
-                    ? () => {
-                        removeImported(t.address);
-                        setTimeout(() => refetch(), 100);
-                      }
-                    : undefined
-                }
               />
             ))}
           </div>
@@ -175,11 +165,9 @@ export function WalletView({ walletAddress }: { walletAddress: string }) {
 function TokenRow({
   token,
   onSwap,
-  onRemove,
 }: {
   token: any;
   onSwap?: () => void;
-  onRemove?: () => void;
 }) {
   const isUp = token.change >= 0;
   return (
@@ -195,11 +183,6 @@ function TokenRow({
               <span className="font-bold text-white text-sm">{token.symbol}</span>
               {token.symbol === 'NXCH' && (
                 <Sparkles className="w-3 h-3 text-nex-green" />
-              )}
-              {token.isImported && (
-                <span className="text-[9px] px-1.5 py-0.5 rounded bg-nex-green/15 text-nex-green border border-nex-green/30">
-                  IMPORTADO
-                </span>
               )}
             </div>
             <div className="text-xs text-gray-400 font-mono">
@@ -221,15 +204,6 @@ function TokenRow({
               </div>
             )}
           </div>
-          {onRemove && (
-            <button
-              onClick={onRemove}
-              className="p-1.5 rounded-lg bg-red-500/10 text-red-400 active:scale-95 transition-transform"
-              aria-label="Quitar token"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          )}
         </div>
       </div>
       {token.lowLiquidity && token.isImported && (

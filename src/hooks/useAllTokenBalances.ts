@@ -28,7 +28,9 @@ const ALCHEMY_URL = ALCHEMY_KEY
   ? `https://worldchain-mainnet.g.alchemy.com/v2/${ALCHEMY_KEY}`
   : '';
 
-const MIN_LIQUIDITY_USD = 500;
+// Filtro de liquidez DESACTIVADO por ahora (era demasiado agresivo)
+// Si querés activarlo, cambiar a un valor mayor a 0
+const MIN_LIQUIDITY_USD = 0;
 
 function formatBalance(raw: bigint, decimals: number) {
   const divisor = BigInt(10) ** BigInt(decimals);
@@ -52,13 +54,19 @@ async function readTokenBalance(walletAddress: string, tokenAddress: string): Pr
   }
 }
 
-// Tokens curados (WLD, USDC, WETH, USDT, NXCH): SIEMPRE visibles, sin filtro
+// Tokens curados (WLD, USDC, WETH, NXCH): SIEMPRE visibles, sin filtro
+// Si el RPC falla al leer balance, igual se muestran con balance 0
 async function fetchKnownTokens(walletAddress: string): Promise<DiscoveredToken[]> {
   const results: DiscoveredToken[] = [];
   await Promise.all(
     VISIBLE_TOKENS.map(async (token) => {
-      const balance = await readTokenBalance(walletAddress, token.address);
-      if (balance === null) return;
+      let balance: bigint = 0n;
+      try {
+        const result = await readTokenBalance(walletAddress, token.address);
+        if (result !== null) balance = result;
+      } catch (err) {
+        console.warn(`No se pudo leer balance de ${token.symbol}:`, err);
+      }
       const { formatted, balanceNum } = formatBalance(balance, token.decimals);
       results.push({
         address: token.address.toLowerCase(),
@@ -211,15 +219,15 @@ async function fetchFromAlchemy(walletAddress: string): Promise<DiscoveredToken[
   }
 }
 
-// Tokens importados manualmente: SIEMPRE visibles, con warning si liquidez baja
+// Tokens importados manualmente: SIEMPRE visibles, con su logo personalizado
 async function fetchImportedTokens(
   walletAddress: string,
-  importedAddresses: string[]
+  importedMeta: { address: string; logo?: string }[]
 ): Promise<DiscoveredToken[]> {
-  if (importedAddresses.length === 0) return [];
+  if (importedMeta.length === 0) return [];
   const results: DiscoveredToken[] = [];
   await Promise.all(
-    importedAddresses.map(async (addr) => {
+    importedMeta.map(async ({ address: addr, logo }) => {
       // Skip si ya es un token conocido
       if (isKnownToken(addr)) return;
 
@@ -240,7 +248,7 @@ async function fetchImportedTokens(
           }).catch(() => '') as Promise<string>,
         ]);
 
-        // Check liquidez (NO filtra, solo agrega warning)
+        // Liquidez (NO filtra, solo agrega warning si <50)
         const liquidityUsd = await estimateTokenLiquidity(addr).catch(() => 0);
 
         const { formatted, balanceNum } = formatBalance(balance, decimals);
@@ -249,12 +257,13 @@ async function fetchImportedTokens(
           symbol: symbol || '?',
           name: name || symbol || '?',
           decimals,
+          logo: logo || undefined,  // FIX: ahora pasa el logo del usuario
           raw: balance,
           formatted,
           balanceNum,
           isImported: true,
           liquidityUsd,
-          lowLiquidity: liquidityUsd < MIN_LIQUIDITY_USD,
+          lowLiquidity: liquidityUsd > 0 && liquidityUsd < 50,
         });
       } catch (err) {
         console.error(`Error importing token ${addr}:`, err);
@@ -265,10 +274,10 @@ async function fetchImportedTokens(
 }
 
 export function useAllTokenBalances(walletAddress: string | null) {
-  const { imported } = useImportedTokens();
+  const { imported, importedMeta } = useImportedTokens();
 
   return useQuery({
-    queryKey: ['balances-v5', walletAddress, imported.join(',')],
+    queryKey: ['balances-v6', walletAddress, imported.join(',')],
     queryFn: async (): Promise<DiscoveredToken[]> => {
       if (!walletAddress) return [];
 
@@ -277,7 +286,7 @@ export function useAllTokenBalances(walletAddress: string | null) {
           fetchKnownTokens(walletAddress),
           fetchFromAlchemy(walletAddress),
           fetchFromWorldscan(walletAddress),
-          fetchImportedTokens(walletAddress, imported),
+          fetchImportedTokens(walletAddress, importedMeta),
         ]);
 
       // Combinar todos por address (prioridad: known > alchemy > worldscan)
@@ -298,13 +307,14 @@ export function useAllTokenBalances(walletAddress: string | null) {
       for (const t of knownTokens) {
         byAddr.set(t.address.toLowerCase(), t);
       }
-      // Importados se agregan (si ya existe, marcamos como importado)
+      // Importados se agregan (si ya existe, marcamos como importado y traemos logo)
       for (const t of importedTokens) {
         const ex = byAddr.get(t.address.toLowerCase());
         if (ex) {
           ex.isImported = true;
           ex.lowLiquidity = t.lowLiquidity;
           ex.liquidityUsd = t.liquidityUsd;
+          if (t.logo) ex.logo = t.logo;  // FIX: el logo personalizado del usuario tiene prioridad
         } else {
           byAddr.set(t.address.toLowerCase(), t);
         }

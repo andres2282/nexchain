@@ -5,7 +5,7 @@ import { NXCH_ADDRESS } from '@/config/tokens';
 import type { SearchedToken } from './useSearchTokens';
 
 const TRENDING_CACHE_TIME = 20 * 60 * 1000; // 20 min
-const MIN_LIQUIDITY = 500;
+const MIN_LIQUIDITY = 0;
 
 // Tokens curados que SIEMPRE aparecen primero en trending (fijados por Andres)
 const PINNED_TOKENS: string[] = [
@@ -13,7 +13,7 @@ const PINNED_TOKENS: string[] = [
 ];
 
 // Tokens "anchor" en World Chain para buscar pares
-const ANCHOR_QUERIES = ['WLD', 'USDC', 'WETH', 'USDT'];
+const ANCHOR_QUERIES = ['WLD', 'USDC', 'WETH'];
 
 async function fetchPairsForQuery(query: string): Promise<any[]> {
   try {

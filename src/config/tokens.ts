@@ -21,8 +21,8 @@ export const NXCH_METADATA: SwapToken = {
   logo: '',
 };
 
-// Tokens disponibles para swap (con liquidez confirmada o por confirmar antes del launch)
-// NXCH se agrega liquidez antes del lanzamiento publico.
+// Tokens disponibles para swap (verificados con liquidez en Uniswap V3 World Chain)
+// USDT removido por poca liquidez en World Chain (solo USDC tiene liquidez decente).
 export const SWAP_TOKENS: SwapToken[] = [
   {
     address: '0x2cFc85d8E48F8EAB294be644d9E25C3030863003',
@@ -44,13 +44,6 @@ export const SWAP_TOKENS: SwapToken[] = [
     name: 'Wrapped Ether',
     decimals: 18,
     logo: 'https://cryptologos.cc/logos/ethereum-eth-logo.png',
-  },
-  {
-    address: '0x102d758f688a4C1C5a80b116bD945d4455460282',
-    symbol: 'USDT',
-    name: 'Tether USD',
-    decimals: 6,
-    logo: 'https://cryptologos.cc/logos/tether-usdt-logo.png',
   },
   {
     address: NXCH_ADDRESS,
